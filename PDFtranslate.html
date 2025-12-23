@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF翻译与修复工具 - https://github.com/021gink/PDFtranslate</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        :root { --scale-factor: 1.3333333333; --ali-blue: #1677ff; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #525659; margin: 0; padding: 30px;
+            display: flex; flex-direction: column; align-items: center;
+        }
+        .toolbar {
+            position: sticky; top: 20px; z-index: 990; background: #fff;
+            padding: 12px 24px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+            display: flex; gap: 15px; margin-bottom: 30px; align-items: center; font-size: 14px;
+            flex-wrap: wrap;
+        }
+        .pdf-page-wrapper {
+            position: relative; background: white; margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            page-break-inside: avoid; 
+        }
+        .page-image { display: block; width: 100%; height: 100%; pointer-events: none; }
+        .textLayer {
+            position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+            overflow: hidden; line-height: 1.0 !important; opacity: 1; mix-blend-mode: multiply;
+        }
+        .textLayer span {
+            color: #000; position: absolute; white-space: pre !important; cursor: text;
+            transform-origin: 0% 0%; margin: 0 !important; padding: 0 !important;
+            display: inline-block !important; line-height: 1 !important;
+        }
+        .textLayer span + span { margin-left: -1px !important; }
+        .textLayer ::selection { background: rgba(0, 89, 255, 0.3); color: #000; }
+        
+        /* 按钮样式 */
+        .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer;
+               font-weight: 600; color: white; transition: 0.2s; display: flex; align-items: center; gap: 6px;}
+        .btn-primary { background: #2196F3; }
+        .btn-success { background: #4CAF50; }
+        .btn-warning { background: #FF9800; }
+        .btn-info    { background: #9C27B0; } 
+        .btn-donate  { background: var(--ali-blue); box-shadow: 0 2px 8px rgba(22, 119, 255, 0.4); }
+        .btn:disabled { background: #ccc; cursor: not-allowed; box-shadow: none; }
+        .btn:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+
+        .slider-group { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
+        .slider-group label { font-size: 12px; color: #333; font-weight: 500; }
+        .slider-wrapper { display: flex; align-items: center; gap: 8px; }
+        input[type="range"] { flex: 1; height: 6px; border-radius: 3px; background: #e0e0e0; outline: none; -webkit-appearance: none; appearance: none; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #2196F3; cursor: pointer; transition: background 0.2s; }
+        input[type="range"]::-webkit-slider-thumb:hover { background: #1976D2; }
+        .slider-value { font-size: 12px; color: #666; min-width: 36px; text-align: right; }
+
+        
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.6); z-index: 2000;
+            display: none; align-items: center; justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+        .modal-overlay.active { display: flex; animation: fadeIn 0.3s ease; }
+        .ali-card {
+            width: 320px; background: var(--ali-blue); border-radius: 12px;
+            overflow: hidden; box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            text-align: center; color: white; position: relative;
+            transform: scale(0.9); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .modal-overlay.active .ali-card { transform: scale(1); }
+        .ali-header { padding: 20px; font-size: 18px; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; justify-content: center; gap: 8px;}
+        .ali-body { background: white; margin: 0 15px; border-radius: 8px; padding: 20px; display: flex; justify-content: center; align-items: center;}
+        .ali-footer { padding: 15px; font-size: 14px; opacity: 0.9; font-weight: 500;}
+        .close-modal {
+            position: absolute; top: 10px; right: 15px; font-size: 24px; color: rgba(255,255,255,0.7);
+            cursor: pointer; transition: 0.2s; line-height: 1; z-index: 10;
+        }
+        .close-modal:hover { color: white; }
+        
+        
+        .qr-svg { display: block; }
+
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        @media print {
+            .toolbar, #status, ::-webkit-scrollbar, .modal-overlay { display: none !important; }
+            body { background: white; margin: 0; padding: 0; display: block; }
+            .pdf-page-wrapper { margin: 0 auto; box-shadow: none; border: none; page-break-after: always; page-break-inside: avoid; }
+            .textLayer, canvas { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <input type="file" id="pdf-upload" accept=".pdf" hidden>
+        <button class="btn btn-primary" onclick="document.getElementById('pdf-upload').click()">📂 上传 PDF</button>
+        <button id="re-render" class="btn btn-warning" disabled>🔄 重新渲染</button>
+        <button id="save-html" class="btn btn-success" disabled>💾 导出 HTML</button>
+        <button id="print-pdf" class="btn btn-info" disabled>🖨️ 另存为 PDF</button>
+        
+        <button id="donate-btn" class="btn btn-donate">☕ 捐赠作者</button>
+
+        <div id="status">等待文件...</div>
+
+        <div class="slider-group">
+            <label for="sup-ratio-slider">上角标比例</label>
+            <div class="slider-wrapper">
+                <input type="range" id="sup-ratio-slider" min="0.1" max="0.5" step="0.01" value="0.15">
+                <span class="slider-value" id="sup-ratio-value">0.15</span>
+            </div>
+        </div>
+        <div class="slider-group">
+            <label for="sub-ratio-slider">下角标比例</label>
+            <div class="slider-wrapper">
+                <input type="range" id="sub-ratio-slider" min="0.1" max="0.5" step="0.01" value="0.15">
+                <span class="slider-value" id="sub-ratio-value">0.15</span>
+            </div>
+        </div>
+        <div class="slider-group">
+            <label for="x-threshold-slider">X方向阈值倍数</label>
+            <div class="slider-wrapper">
+                <input type="range" id="x-threshold-slider" min="1" max="5" step="0.1" value="2.0">
+                <span class="slider-value" id="x-threshold-value">2.0</span>
+            </div>
+        </div>
+    </div>
+    
+    <div id="output-stream"></div>
+
+    <div class="modal-overlay" id="donate-modal">
+        <div class="ali-card">
+            <div class="close-modal" onclick="toggleModal(false)">×</div>
+            <div class="ali-header">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="white"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v2h-2zm4.5 5h-7v2h2v5h2v-5h3z"/></svg>
+                推荐使用支付宝
+            </div>
+            <div class="ali-body">
+                <svg class="qr-svg" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 1147 1147" width="260" height="260">
+                    <path fill="#fff" d="M0 0h1147v1147H0z"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 62)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 93)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 155)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 186)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 217)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 248)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 279)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1054 310)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 341)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 372)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 403)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 124 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 434)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 465)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 496)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 527)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 558)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 589)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 124 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 620)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 651)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 124 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 682)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 124 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 713)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 744)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 155 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 186 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 279 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 775)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 62 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 93 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 217 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 248 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 806)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 837)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 868)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 496 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1054 899)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1054 930)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 992 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1023 961)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 744 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 837 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 899 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 930 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 961 992)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 341 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 465 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 527 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 1023)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 310 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 372 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 403 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 434 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 558 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 589 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 620 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 651 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 682 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 713 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 775 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 806 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 868 1054)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.31 0 0 .31 1054 1054)"/>
+                    <g style="fill:#000">
+                        <path d="M15 15h70v70H15z" style="fill:none" transform="translate(62 62)scale(2.17)"/>
+                        <path d="M246.45 62H62v217h217V62zm0 184.45H94.55V94.55h151.9z"/>
+                    </g>
+                    <g style="fill:#000">
+                        <path d="M15 15h70v70H15z" style="fill:none" transform="translate(868 62)scale(2.17)"/>
+                        <path d="M1052.45 62H868v217h217V62zm0 184.45h-151.9V94.55h151.9z"/>
+                    </g>
+                    <g style="fill:#000">
+                        <path d="M15 15h70v70H15z" style="fill:none" transform="translate(62 868)scale(2.17)"/>
+                        <path d="M246.45 868H62v217h217V868zm0 184.45H94.55v-151.9h151.9z"/>
+                    </g>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.93 0 0 .93 124 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.93 0 0 .93 930 124)"/>
+                    <path d="M0 0h100v100H0z" style="fill:#000" transform="matrix(.93 0 0 .93 124 930)"/>
+                </svg>
+            </div>
+            <div class="ali-footer" style="display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 15px 18px;">
+                <span style="font-size: 14px; opacity: 0.9; font-weight: 500;">打开支付宝 [扫一扫]</span>
+                <a href="https://github.com/021gink/PDFtranslate" target="_blank" 
+                style="color: #ffffff; font-size: 14px; font-weight: 500; text-decoration: none; opacity: 0.9; display: flex; align-items: center; gap: 6px; transition: opacity 0.2s;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.37-3.24.705-3.915-1.56-3.915-1.56-.525-1.335-1.275-1.695-1.275-1.695-1.02-.705.075-.69.075-.69 1.125.08 1.725 1.155 1.725 1.155 1.005 1.71 2.63 1.215 3.27.93.105-.72.39-1.215.705-1.495-2.55-.285-5.25-1.275-5.25-5.685 0-1.26.45-2.295 1.185-3.105-.12-.285-.51-1.47.12-3.06 0 0 .975-.315 3.195 1.195.93-.255 1.92-.38 2.91-.38.99 0 1.98.125 2.91.38 2.22-1.515 3.195-1.195 3.195-1.195.63 1.59.24 2.775.12 3.06.735.81 1.185 1.845 1.185 3.105 0 4.425-2.715 5.385-5.295 5.67.42.36.795 1.065.795 2.145 0 1.545-.015 2.79-.015 3.165 0 .315.225.69.825.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12z"/>
+                    </svg>
+                    请给项目点个 Star 支持一下
+                </a>
+            </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        const outputStream = document.getElementById('output-stream');
+        const status = document.getElementById('status');
+        const saveBtn = document.getElementById('save-html');
+        const reRenderBtn = document.getElementById('re-render'); 
+        const printBtn = document.getElementById('print-pdf');
+        
+        const RENDER_SCALE = 2.0;
+        const PT_TO_PX = 96.0 / 72.0;
+        const PROJECT_URL = "https://github.com/021gink/PDFtranslate";
+        let originalFileName = "document";
+
+        let supRatio = 0.15;
+        let subRatio = 0.15;
+        let xThresholdMultiplier = 2.0;
+        let pdfDoc = null;
+
+        // --- 捐赠弹窗逻辑 ---
+        const modal = document.getElementById('donate-modal');
+        function toggleModal(show) {
+            if (show) modal.classList.add('active');
+            else modal.classList.remove('active');
+        }
+        document.getElementById('donate-btn').onclick = () => toggleModal(true);
+        modal.onclick = (e) => { if (e.target === modal) toggleModal(false); };
+
+        function initSliders() {
+            const supSlider = document.getElementById('sup-ratio-slider');
+            const supValue = document.getElementById('sup-ratio-value');
+            supSlider.oninput = function() {
+                supRatio = parseFloat(this.value);
+                supValue.textContent = supRatio.toFixed(2);
+            };
+
+            const subSlider = document.getElementById('sub-ratio-slider');
+            const subValue = document.getElementById('sub-ratio-value');
+            subSlider.oninput = function() {
+                subRatio = parseFloat(this.value);
+                subValue.textContent = subRatio.toFixed(2);
+            };
+
+            const xSlider = document.getElementById('x-threshold-slider');
+            const xValue = document.getElementById('x-threshold-value');
+            xSlider.oninput = function() {
+                xThresholdMultiplier = parseFloat(this.value);
+                xValue.textContent = xThresholdMultiplier.toFixed(1);
+            };
+        }
+
+        async function reRenderPDF() {
+            if (!pdfDoc) return;
+            outputStream.innerHTML = '';
+            const pageCount = pdfDoc.numPages;
+            for (let i = 1; i <= pageCount; i++) {
+                status.textContent = `重新渲染第 ${i}/${pageCount} 页`;
+                await renderPage(await pdfDoc.getPage(i), i);
+            }
+            status.textContent = "✅ 重新渲染完成";
+        }
+
+        function createTextBlockingProxy(realContext) {
+            const handler = {
+                get(target, prop) {
+                    if (prop === 'fillText' || prop === 'strokeText') return () => {};
+                    const value = target[prop];
+                    return typeof value === 'function' ? (...args) => value.apply(target, args) : value;
+                },
+                set(target, prop, value) { target[prop] = value; return true; }
+            };
+            return new Proxy(realContext, handler);
+        }
+
+        function optimizeTextContent(textContent) {
+            const items = textContent.items;
+            if (items.length === 0) return textContent;
+            const getFontScale = (item) => Math.hypot(item.transform[0], item.transform[1]);
+            const getFontHeight = (item) => getFontScale(item) * 1.2;
+            const isVertical = (item) => {
+                const [a, b, c, d] = item.transform;
+                return Math.abs(a) < 0.1 && Math.abs(d) < 0.1 && Math.abs(b) > 1 && Math.abs(c) > 1;
+            };
+
+            const detectSuperscript = (current, prev) => {
+                if (!prev) return null;
+                const scale = getFontScale(current);
+                const prevScale = getFontScale(prev);
+                if (scale > prevScale * 0.85) return null;
+                const yDiff = current.transform[5] - prev.transform[5];
+                const xClose = Math.abs(current.transform[4] - (prev.transform[4] + prev.width)) < prevScale * xThresholdMultiplier;
+                if (!xClose) return null;
+                if (yDiff > prevScale * supRatio) return 'sup';
+                if (yDiff < -prevScale * subRatio) return 'sub';
+                return null;
+            };
+
+            const fontScales = items.map(item => getFontScale(item)).filter(scale => !isNaN(scale));
+            const medianFontSize = fontScales.length > 0 ? fontScales.slice().sort((a, b) => a - b)[Math.floor(fontScales.length / 2)] : 12;
+            const normalItems = items.filter(i => getFontScale(i) > medianFontSize * 0.7 && i.str?.trim());
+            const smallItems = items.filter(i => getFontScale(i) <= medianFontSize * 0.7 && i.str?.trim());
+            const processed = new Set();
+            const lineGroups = [];
+
+            for (const item of normalItems) {
+                if (processed.has(item)) continue;
+                const itemY = item.transform[5];
+                const itemFontHeight = getFontHeight(item);
+                const tolerance = Math.max(itemFontHeight * 0.5, 3.0);
+                let closestGroup = null;
+                let minDist = Infinity;
+                for (const group of lineGroups) {
+                    const dist = Math.abs(itemY - group.centerY);
+                    if (dist <= tolerance && dist < minDist) { minDist = dist; closestGroup = group; }
+                }
+                if (closestGroup) {
+                    closestGroup.items.push(item);
+                    const allY = closestGroup.items.map(i => i.transform[5]);
+                    closestGroup.centerY = allY.reduce((a, b) => a + b, 0) / allY.length;
+                    processed.add(item);
+                } else {
+                    lineGroups.push({ items: [item], centerY: itemY, fontHeight: itemFontHeight });
+                    processed.add(item);
+                }
+            }
+
+            const attachTolerance = medianFontSize * 0.8;
+            for (const item of smallItems) {
+                if (processed.has(item)) continue;
+                let closestGroup = null;
+                let minDist = Infinity;
+                for (const group of lineGroups) {
+                    const dist = Math.abs(item.transform[5] - group.centerY);
+                    if (dist < minDist) { minDist = dist; closestGroup = group; }
+                }
+                if (closestGroup && minDist < attachTolerance) { closestGroup.items.push(item); processed.add(item); }
+            }
+
+            const mergedItems = [];
+            lineGroups.sort((a, b) => b.centerY - a.centerY);
+            for (const group of lineGroups) {
+                let groupItems = group.items.filter(i => i.str?.trim());
+                if (groupItems.length === 0) continue;
+                groupItems.sort((a, b) => a.transform[4] - b.transform[4]);
+                let currentSpan = { ...groupItems[0], str: groupItems[0].str, transform: [...groupItems[0].transform], width: groupItems[0].width };
+                for (let i = 1; i < groupItems.length; i++) {
+                    const next = groupItems[i];
+                    const nextCopy = { ...next, transform: [...next.transform] };
+                    if (!isVertical(currentSpan) && !isVertical(nextCopy)) {
+                        const mark = detectSuperscript(nextCopy, currentSpan);
+                        if (mark) {
+                            const startTag = mark === 'sup' ? '\u200B' : '\u200C';
+                            const endTag = '\u200D';
+                            currentSpan.str += `${startTag}${nextCopy.str}${endTag}`;
+                            currentSpan.width = Math.max(currentSpan.width, (nextCopy.transform[4] + nextCopy.width) - currentSpan.transform[4]);
+                            continue;
+                        }
+                        const xGap = nextCopy.transform[4] - (currentSpan.transform[4] + currentSpan.width);
+                        const yDiff = Math.abs(nextCopy.transform[5] - currentSpan.transform[5]);
+                        if (xGap < getFontHeight(currentSpan) && yDiff < 2.0) {
+                            if (xGap > 0.4) currentSpan.str += ' ';
+                            currentSpan.str += nextCopy.str;
+                            currentSpan.width = (nextCopy.transform[4] + nextCopy.width) - currentSpan.transform[4];
+                            continue;
+                        }
+                    }
+                    mergedItems.push(currentSpan);
+                    currentSpan = nextCopy;
+                }
+                mergedItems.push(currentSpan);
+            }
+            return { ...textContent, items: mergedItems };
+        }
+
+        function postProcessTextLayer(textLayerDiv) {
+            const spans = textLayerDiv.querySelectorAll('span');
+            spans.forEach(span => {
+                const text = span.textContent;
+                if (text.includes('\u200B') || text.includes('\u200C')) {
+                    let html = text.replace(/\u200B(.*?)\u200D/g, '<sup>$1</sup>').replace(/\u200C(.*?)\u200D/g, '<sub>$1</sub>');
+                    span.innerHTML = html;
+                    const style = span.style;
+                    if (style.transform) {
+                        const m = style.transform.match(/matrix\((.+)\)/);
+                        if (m) {
+                            let v = m[1].split(',').map(parseFloat);
+                            const scaleX = Math.sqrt(v[0]*v[0] + v[1]*v[1]);
+                            const scaleY = Math.sqrt(v[2]*v[2] + v[3]*v[3]);
+                            if (scaleX < scaleY * 0.99) {
+                                const ratio = scaleY / scaleX;
+                                v[0] *= ratio; v[1] *= ratio;
+                                style.transform = `matrix(${v.join(',')})`;
+                            }
+                        }
+                    }
+                    style.width = 'auto';
+                }
+            });
+        }
+
+        async function renderPage(page, pageNum) {
+            const viewport = page.getViewport({ scale: PT_TO_PX });
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pdf-page-wrapper';
+            wrapper.style.width = `${Math.floor(viewport.width)}px`;
+            wrapper.style.height = `${Math.floor(viewport.height)}px`;
+            const canvas = document.createElement('canvas');
+            canvas.className = 'page-image';
+            canvas.width = viewport.width * RENDER_SCALE;
+            canvas.height = viewport.height * RENDER_SCALE;
+            await page.render({ canvasContext: createTextBlockingProxy(canvas.getContext('2d')), viewport: page.getViewport({ scale: PT_TO_PX * RENDER_SCALE }) }).promise;
+            wrapper.appendChild(canvas);
+            const textLayerDiv = document.createElement('div');
+            textLayerDiv.className = 'textLayer';
+            textLayerDiv.style.width = wrapper.style.width;
+            textLayerDiv.style.height = wrapper.style.height;
+            const optimized = optimizeTextContent(await page.getTextContent());
+            await pdfjsLib.renderTextLayer({ textContentSource: optimized, container: textLayerDiv, viewport, enhanceTextSelection: true }).promise;
+            postProcessTextLayer(textLayerDiv);
+            wrapper.appendChild(textLayerDiv);
+            outputStream.appendChild(wrapper);
+        }
+
+        initSliders();
+        reRenderBtn.onclick = reRenderPDF;
+        printBtn.onclick = () => { window.print(); };
+
+        document.getElementById('pdf-upload').onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            originalFileName = file.name.replace(/\.[^/.]+$/, "");
+            status.textContent = "解析中...";
+            outputStream.innerHTML = '';
+            pdfDoc = await pdfjsLib.getDocument(await file.arrayBuffer()).promise;
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                status.textContent = `渲染第 ${i}/${pdfDoc.numPages} 页`;
+                await renderPage(await pdfDoc.getPage(i), i);
+            }
+            status.textContent = "✅ 修复完成";
+            saveBtn.disabled = reRenderBtn.disabled = printBtn.disabled = false;
+        };
+
+        saveBtn.onclick = () => {
+            const clone = outputStream.cloneNode(true);
+            const originalCanvases = outputStream.querySelectorAll('canvas');
+            clone.querySelectorAll('.pdf-page-wrapper').forEach((w, i) => {
+                const img = document.createElement('img');
+                img.src = originalCanvases[i].toDataURL('image/jpeg', 0.8);
+                img.className = 'page-image';
+                w.replaceChild(img, w.querySelector('canvas'));
+            });
+            const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8">${document.querySelector('style').outerHTML}</head><body><div style="display:flex;flex-direction:column;align-items:center;padding:30px;background:#525659;">${clone.innerHTML}</div></body></html>`;
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(new Blob([htmlContent], { type: 'text/html' }));
+            link.download = `${originalFileName}_fixed.html`;
+            link.click();
+        };
+    </script>
+</body>
+</html>
